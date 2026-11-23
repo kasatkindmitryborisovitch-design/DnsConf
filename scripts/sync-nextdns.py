@@ -148,9 +148,11 @@ def choose(previous, candidates, preferred):
         scores = dict(zip(jobs, pool.map(probe, jobs)))
     chosen = {}
     limited = []
+    unreachable = []
     for name, ips in candidates.items():
         if not ips:
-            raise RuntimeError(f"Source is missing managed rule {name}")
+            unreachable.append(name)
+            continue
         previous_ip = previous.get(name)
         ordered = list(dict.fromkeys([previous_ip, *preferred[name], *ips]))
         ranked = [ip for ip in ordered if scores.get((name, ip), 0) == 2]
@@ -159,9 +161,10 @@ def choose(previous, candidates, preferred):
             if ranked:
                 limited.append(name)
         if not ranked:
-            raise RuntimeError(f"No HTTPS candidate answered for {name}; rules were not changed")
+            unreachable.append(name)
+            continue
         chosen[name] = ranked[0]
-    return chosen, limited
+    return chosen, limited, unreachable
 
 
 def content_map(rows):
@@ -250,6 +253,8 @@ def check(api, target, chosen):
 
 
 def apply(api, plan):
+    if set(plan["chosen"]) != MANAGED.keys():
+        raise RuntimeError("Some managed domains have no verified candidate; profile was left intact")
     if not plan["fits"]:
         raise RuntimeError(f'Plan has {len(plan["target"])} rules; maximum with reserve is {TARGET}')
     current = api.entries()
@@ -287,11 +292,15 @@ def main():
     source = read(Request(SOURCE)).decode()
     candidates = hosts(source)
     preferred = hosts((ROOT / "hosts/openai-preferred.hosts").read_text())
-    chosen, limited = choose(before, candidates, preferred)
-    target, retired, fits = make_plan(before, chosen, args.retire_legacy_discord)
+    chosen, limited, unreachable = choose(before, candidates, preferred)
+    # Estimate capacity for every intended name, even when its candidate could not be verified.
+    pending = {name: before.get(name, "candidate pending") for name in unreachable}
+    target, retired, fits = make_plan(before, pending | chosen, args.retire_legacy_discord)
     save_json(args.file, {"before": before, "target": target, "chosen": chosen, "retired": retired, "fits": fits})
     print(f"NextDNS before: {len(before)}/{LIMIT}. Planned: {len(target)}/{LIMIT}. Reserve target: {LIMIT - TARGET}.")
-    print(f"Managed: {len(chosen)}. New: {len(chosen.keys() - before.keys())}. Legacy Discord to retire: {len(retired)}.")
+    print(f"Managed: {len(MANAGED)}. New: {len(MANAGED.keys() - before.keys())}. Legacy Discord to retire: {len(retired)}.")
+    if unreachable:
+        print("No verified HTTPS candidate for: " + ", ".join(unreachable))
     if limited:
         print("TLS reachable, but HTTPS application access inconclusive: " + ", ".join(limited))
     if not fits:

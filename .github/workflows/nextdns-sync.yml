@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
       retire_legacy_discord:
-        description: Free space using the legacy Discord entries (one-time)
+        description: Use legacy Discord entries when estimating or applying a one-time cleanup
         type: boolean
         default: false
 
