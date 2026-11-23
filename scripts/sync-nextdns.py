@@ -35,7 +35,9 @@ MANAGED = {
     "anthropic.com": "/",
 }
 VERIFY = ("chatgpt.com", "api.openai.com", "claude.ai", "api.anthropic.com")
-LEGACY_DISCORD = re.compile(r"finland10[01][0-9]{2}\.discord\.media")
+# Fixed migration scope. Re-running this action cannot remove another batch.
+APPROVED_DISCORD = tuple(f"finland{i}.discord.media" for i in range(10167, 10200))
+LEGACY_DISCORD_IP = "104.25.158.178"
 LIMIT = 500
 TARGET = 480
 TLS = ssl.create_default_context()
@@ -173,8 +175,7 @@ def content_map(rows):
 
 def make_plan(before, chosen, allow_retire):
     target = before | chosen
-    candidates = sorted(name for name, value in before.items()
-                        if LEGACY_DISCORD.fullmatch(name) and value == "104.25.158.178")
+    candidates = [name for name in APPROVED_DISCORD if before.get(name) == LEGACY_DISCORD_IP]
     slots = max(0, len(target) - TARGET)
     retired = candidates[-slots:] if slots and allow_retire else []
     for name in retired:
@@ -252,18 +253,33 @@ def check(api, target, chosen):
             time.sleep(4)
 
 
+def cleanup_target(before):
+    conflicts = [name for name in APPROVED_DISCORD
+                 if name in before and before[name] != LEGACY_DISCORD_IP]
+    if conflicts:
+        raise RuntimeError("At least one approved Discord entry changed IP; inspect before removal")
+    return {name: ip for name, ip in before.items() if name not in APPROVED_DISCORD}
+
+
 def apply(api, plan):
-    if set(plan["chosen"]) != MANAGED.keys():
+    cleanup = plan.get("cleanup_discord_only", False)
+    before, target = plan["before"], plan["target"]
+    if cleanup and target != cleanup_target(before):
+        raise RuntimeError("Discord cleanup is outside the fixed scope")
+    if not cleanup and set(plan["chosen"]) != MANAGED.keys():
         raise RuntimeError("Some managed domains have no verified candidate; profile was left intact")
     if not plan["fits"]:
         raise RuntimeError(f'Plan has {len(plan["target"])} rules; maximum with reserve is {TARGET}')
     current = api.entries()
-    before, target = plan["before"], plan["target"]
     if content_map(current) != before:
         raise RuntimeError("Profile changed since planning; regenerate the plan")
     try:
         reconcile(api, current, target)
-        check(api, target, plan["chosen"])
+        if cleanup:
+            if content_map(api.entries()) != target:
+                raise RuntimeError("NextDNS rewrite list differs from the cleanup plan")
+        else:
+            check(api, target, plan["chosen"])
     except Exception:
         # Restore only the affected names, keeping unrelated concurrent changes.
         affected = {name for name in before.keys() | target.keys() if before.get(name) != target.get(name)}
@@ -275,7 +291,10 @@ def apply(api, plan):
             raise RuntimeError("Rollback could not be verified; encrypted backup is available") from None
         print("Restored the previous rewrite values after a failed application", flush=True)
         raise
-    print(f"Verified {len(target)} NextDNS rewrites and four live DNS answers", flush=True)
+    if cleanup:
+        print(f"Verified {len(before) - len(target)} Discord removals; {len(target)}/{LIMIT} rules remain", flush=True)
+    else:
+        print(f"Verified {len(target)} NextDNS rewrites and four live DNS answers", flush=True)
 
 
 def main():
@@ -283,12 +302,20 @@ def main():
     parser.add_argument("mode", choices=("plan", "apply"))
     parser.add_argument("--file", type=Path, required=True)
     parser.add_argument("--retire-legacy-discord", action="store_true")
+    parser.add_argument("--cleanup-discord-only", action="store_true")
     args = parser.parse_args()
     api = NextDNS()
     if args.mode == "apply":
         apply(api, json.loads(args.file.read_text()))
         return
     before = content_map(api.entries())
+    if args.cleanup_discord_only:
+        target = cleanup_target(before)
+        removed = sorted(before.keys() - target.keys())
+        save_json(args.file, {"before": before, "target": target, "chosen": {}, "retired": removed,
+                              "fits": len(target) <= LIMIT, "cleanup_discord_only": True})
+        print(f"Discord cleanup plan: {len(removed)} named legacy rules; {len(target)}/{LIMIT} rules after cleanup")
+        return
     source = read(Request(SOURCE)).decode()
     candidates = hosts(source)
     preferred = hosts((ROOT / "hosts/openai-preferred.hosts").read_text())

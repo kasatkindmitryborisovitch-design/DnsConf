@@ -9,7 +9,11 @@ on:
         type: boolean
         default: false
       retire_legacy_discord:
-        description: Use legacy Discord entries when estimating or applying a one-time cleanup
+        description: Include the approved batch of legacy Discord rules in the sync plan
+        type: boolean
+        default: false
+      cleanup_discord_only:
+        description: Remove only the fixed batch of 33 legacy Discord rules
         type: boolean
         default: false
 
@@ -33,12 +37,14 @@ jobs:
       AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
       APPLY: ${{ inputs.apply || github.event_name == 'schedule' }}
       RETIRE_DISCORD: ${{ inputs.retire_legacy_discord }}
+      CLEANUP_DISCORD_ONLY: ${{ inputs.cleanup_discord_only }}
     steps:
       - uses: actions/checkout@v5
       - name: Plan and check candidates
         run: |
           args=()
           if [[ "$RETIRE_DISCORD" == true ]]; then args+=(--retire-legacy-discord); fi
+          if [[ "$CLEANUP_DISCORD_ONLY" == true ]]; then args+=(--cleanup-discord-only); fi
           python3 scripts/sync-nextdns.py plan --file "$RUNNER_TEMP/nextdns-plan.json" "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Encrypt backup before writing
         if: env.APPLY == 'true'
