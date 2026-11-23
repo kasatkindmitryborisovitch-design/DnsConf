@@ -1,4 +1,5 @@
 name: NextDNS managed rewrites
+run-name: ${{ inputs.report_id || 'NextDNS managed rewrites' }}
 on:
   schedule:
     - cron: '17 1 * * *'
@@ -12,6 +13,10 @@ on:
         description: Include the approved batch of legacy Discord rules in the sync plan
         type: boolean
         default: false
+      report_id:
+        description: Unique name for a local verification run
+        type: string
+        default: ''
       wifi_candidates:
         description: JSON map from the local Zapret verification
         type: string
