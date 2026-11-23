@@ -32,7 +32,7 @@ MANAGED = {
     "api.anthropic.com": "/v1/models",
     "anthropic.com": "/",
 }
-VERIFY = ("chatgpt.com", "api.openai.com", "claude.ai", "api.anthropic.com")
+ZAPRET_DOH = "https://dns.zapret.moe/dns-query"
 # Fixed migration scope. Re-running this action cannot remove another batch.
 APPROVED_DISCORD = tuple(f"finland{i}.discord.media" for i in range(10167, 10200))
 LEGACY_DISCORD_IP = "104.25.158.178"
@@ -197,12 +197,12 @@ def reconcile(api, current, target):
             api.add(name, ip)
 
 
-def resolved(profile, name):
+def query_a(endpoint, name):
     query_id = os.urandom(2)
     labels = b"".join(bytes([len(part)]) + part.encode() for part in name.split("."))
     query = query_id + struct.pack("!HHHHH", 0x0100, 1, 0, 0, 0) + labels + b"\0\0\x01\0\x01"
     encoded = base64.urlsafe_b64encode(query).decode().rstrip("=")
-    request = Request(f"https://dns.nextdns.io/{profile}?dns={encoded}", headers={
+    request = Request(f"{endpoint}?dns={encoded}", headers={
         "Accept": "application/dns-message",
     })
     data = read(request, maximum=65535)
@@ -210,7 +210,7 @@ def resolved(profile, name):
         raise RuntimeError("Malformed DoH answer")
     flags, questions, answers = struct.unpack_from("!HHH", data, 2)
     if flags & 0x000F or not flags & 0x8000:
-        raise RuntimeError("NextDNS did not resolve the verification query")
+        raise RuntimeError(f"DNS query failed for {name}")
 
     def skip_name(offset):
         while data[offset] != 0:
@@ -241,8 +241,10 @@ def check(api, target, chosen):
         try:
             if content_map(api.entries()) != target:
                 raise RuntimeError("NextDNS rewrite list differs from the applied plan")
-            for name in VERIFY:
-                if chosen[name] not in resolved(api.profile, name):
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                answers = list(pool.map(lambda name: query_a(f"https://dns.nextdns.io/{api.profile}", name), chosen))
+            for name, ips in zip(chosen, answers):
+                if chosen[name] not in ips:
                     raise RuntimeError(f"NextDNS did not return the planned address for {name}")
             return
         except RuntimeError:
@@ -292,7 +294,20 @@ def apply(api, plan):
     if cleanup:
         print(f"Verified {len(before) - len(target)} Discord removals; {len(target)}/{LIMIT} rules remain", flush=True)
     else:
-        print(f"Verified {len(target)} NextDNS rewrites and four live DNS answers", flush=True)
+        print(f"Verified {len(target)} NextDNS rewrites and {len(plan['chosen'])} live DNS answers", flush=True)
+
+
+def validate_local_candidates(report):
+    chosen = json.loads(report)
+    if not isinstance(chosen, dict) or chosen.keys() != MANAGED.keys():
+        raise RuntimeError("The Wi-Fi report must contain exactly the managed names")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        answers = list(pool.map(lambda name: query_a(ZAPRET_DOH, name), chosen))
+    for name, ips in zip(chosen, answers):
+        ip = ipaddress.IPv4Address(chosen[name])
+        if not ip.is_global or ip.is_multicast or str(ip) not in ips:
+            raise RuntimeError(f"The Wi-Fi candidate for {name} is no longer published by Zapret")
+    return chosen
 
 
 def main():
@@ -314,10 +329,16 @@ def main():
                               "fits": len(target) <= LIMIT, "cleanup_discord_only": True})
         print(f"Discord cleanup plan: {len(removed)} named legacy rules; {len(target)}/{LIMIT} rules after cleanup")
         return
-    source = read(Request(SOURCE)).decode()
-    candidates = hosts(source)
-    preferred = hosts((ROOT / "hosts/openai-preferred.hosts").read_text())
-    chosen, limited, unreachable = choose(before, candidates, preferred)
+    report = os.environ.get("WIFI_CANDIDATES", "").strip()
+    if report:
+        chosen = validate_local_candidates(report)
+        limited, unreachable = [], []
+        print(f"Confirmed {len(chosen)} Wi-Fi candidates are still published by Zapret")
+    else:
+        source = read(Request(SOURCE)).decode()
+        candidates = hosts(source)
+        preferred = hosts((ROOT / "hosts/openai-preferred.hosts").read_text())
+        chosen, limited, unreachable = choose(before, candidates, preferred)
     # Estimate capacity for every intended name, even when its candidate could not be verified.
     pending = {name: before.get(name, "candidate pending") for name in unreachable}
     target, retired, fits = make_plan(before, pending | chosen, args.retire_legacy_discord)
