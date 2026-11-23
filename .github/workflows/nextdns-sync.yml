@@ -1,0 +1,56 @@
+name: NextDNS managed rewrites
+on:
+  schedule:
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply the verified plan to NextDNS
+        type: boolean
+        default: false
+      retire_legacy_discord:
+        description: Free space using the legacy Discord entries (one-time)
+        type: boolean
+        default: false
+
+concurrency:
+  group: nextdns-rewrites
+  cancel-in-progress: false
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || vars.NEXTDNS_SYNC_ACTIVE == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 12
+    environment: DNS
+    env:
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+      APPLY: ${{ inputs.apply || github.event_name == 'schedule' }}
+      RETIRE_DISCORD: ${{ inputs.retire_legacy_discord }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Plan and check candidates
+        run: |
+          args=()
+          if [[ "$RETIRE_DISCORD" == true ]]; then args+=(--retire-legacy-discord); fi
+          python3 scripts/sync-nextdns.py plan --file "$RUNNER_TEMP/nextdns-plan.json" "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Encrypt backup before writing
+        if: env.APPLY == 'true'
+        run: |
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:AUTH_SECRET \
+            -in "$RUNNER_TEMP/nextdns-plan.json" -out "$RUNNER_TEMP/nextdns-backup.enc"
+      - uses: actions/upload-artifact@v4
+        if: env.APPLY == 'true'
+        with:
+          name: nextdns-backup-${{ github.run_id }}
+          path: ${{ runner.temp }}/nextdns-backup.enc
+          retention-days: 30
+      - name: Apply and verify
+        if: env.APPLY == 'true'
+        run: python3 scripts/sync-nextdns.py apply --file "$RUNNER_TEMP/nextdns-plan.json" | tee -a "$GITHUB_STEP_SUMMARY"
