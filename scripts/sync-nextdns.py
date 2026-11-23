@@ -27,10 +27,8 @@ MANAGED = {
     "platform.openai.com": "/",
     "oaistatic.com": "/",
     "cdn.oaistatic.com": "/",
-    "oaiusercontent.com": "/",
     "files.oaiusercontent.com": "/",
     "claude.ai": "/",
-    "api.claude.ai": "/",
     "api.anthropic.com": "/v1/models",
     "anthropic.com": "/",
 }
